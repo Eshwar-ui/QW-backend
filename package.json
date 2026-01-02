@@ -2,12 +2,12 @@
   "name": "server",
   "version": "1.0.0",
   "description": "",
-  "main": "server.js",
+  "main": "src/server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon server.js",
-    "seed": "node seedData.js",
-    "update-sample-data": "node updateUsersToSampleData.js"
+    "start": "nodemon src/server.js",
+    "seed": "node scripts/seedData.js",
+    "update-sample-data": "node scripts/updateUsersToSampleData.js"
   },
   "keywords": [],
   "author": "",

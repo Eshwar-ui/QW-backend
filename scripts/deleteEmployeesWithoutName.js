@@ -1,12 +1,12 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
-const dbConfig = require("./utils/dbConfig");
-const Employee = require("./models/Employees");
-const Attendance = require("./models/Attendance");
-const Leave = require("./models/Leaves");
-const Payslips = require("./models/EmployeesPayslips");
-const EmployeeLocation = require("./models/EmployeeLocation");
-const Notification = require("./models/Notification");
+const dbConfig = require("../src/utils/dbConfig");
+const Employee = require("../src/models/Employees");
+const Attendance = require("../src/models/Attendance");
+const Leave = require("../src/models/Leaves");
+const Payslips = require("../src/models/EmployeesPayslips");
+const EmployeeLocation = require("../src/models/EmployeeLocation");
+const Notification = require("../src/models/Notification");
 
 // Connect to database
 mongoose

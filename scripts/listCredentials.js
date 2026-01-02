@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
-const dbConfig = require("./utils/dbConfig");
-const Employee = require("./models/Employees");
+const dbConfig = require("../src/utils/dbConfig");
+const Employee = require("../src/models/Employees");
 
 // Connect to database
 mongoose
