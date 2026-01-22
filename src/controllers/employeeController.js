@@ -54,7 +54,27 @@ exports.addEmployee = async (req, res) => {
 
   } catch (error) {
     console.error("Error adding employee:", error);
-    res.status(500).json({ error: "Unable to add employee. Please try again later." });
+    if (error && error.name === "ValidationError") {
+      const fields = Object.keys(error.errors || {});
+      const message =
+        fields.length > 0
+          ? `Missing/invalid fields: ${fields.join(", ")}`
+          : "Invalid employee data. Please check required fields.";
+      return res.status(400).json({ error: message });
+    }
+    if (error && error.code === 11000) {
+      const duplicateField = Object.keys(error.keyValue || {})[0];
+      const duplicateValue =
+        duplicateField && error.keyValue ? error.keyValue[duplicateField] : "";
+      return res.status(409).json({
+        error: duplicateField
+          ? `${duplicateField} ${duplicateValue} already exists. Please use a different value.`
+          : "Duplicate entry detected. Please use different values.",
+      });
+    }
+    res
+      .status(500)
+      .json({ error: "Unable to add employee. Please try again later." });
   }
 };
 
