@@ -91,6 +91,19 @@ exports.generatePayslip = async (req, res) => {
       arrear,
     } = req.body;
 
+    // Validate required fields
+    if (!empId || !month || !year) {
+      return res.status(400).json({ 
+        error: "Employee ID, month, and year are required" 
+      });
+    }
+
+    if (basicSalary === undefined || basicSalary === null) {
+      return res.status(400).json({ 
+        error: "Basic salary is required" 
+      });
+    }
+
     function getMonthName(monthNumber) {
       const months = [
         "January", "February", "March", "April", "May", "June",
@@ -99,11 +112,17 @@ exports.generatePayslip = async (req, res) => {
       return months[monthNumber - 1];
     }
     function formatDate(dateStr) {
-      const date = new Date(dateStr);
-      const day = String(date.getDate()).padStart(2, "0");
-      const monthNumber = String(date.getMonth() + 1).padStart(2, "0");
-      const yearStr = date.getFullYear();
-      return `${day}-${monthNumber}-${yearStr}`;
+      if (!dateStr) return "N/A";
+      try {
+        const date = new Date(dateStr);
+        if (isNaN(date.getTime())) return "N/A";
+        const day = String(date.getDate()).padStart(2, "0");
+        const monthNumber = String(date.getMonth() + 1).padStart(2, "0");
+        const yearStr = date.getFullYear();
+        return `${day}-${monthNumber}-${yearStr}`;
+      } catch (e) {
+        return "N/A";
+      }
     }
 
     const existingPayslip = await Payslip.findOne({ empId, month, year });
@@ -114,17 +133,22 @@ exports.generatePayslip = async (req, res) => {
     }
 
     const employee = await Employees.findOne({ employeeId: empId });
+    if (!employee) {
+      return res.status(404).json({ 
+        error: `Employee with ID ${empId} not found` 
+      });
+    }
 
     // Data to pass to the HBS template
     const payslipData = {
       month: getMonthName(month),
       year,
       employeeCode: empId,
-      name: employee.fullName,
+      name: employee.fullName || `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || "N/A",
       dateOfJoining: formatDate(employee.joiningDate),
-      location: employee.address || "Hyderabad",
-      department: employee.department,
-      designation: employee.designation,
+      location: employee.address || "N/A",
+      department: employee.department || "N/A",
+      designation: employee.designation || "N/A",
       grade: employee.grade || "NA",
       bankName: employee.bankname || "NA",
       bankAccountNo: employee.accountnumber || "NA",
@@ -208,14 +232,47 @@ exports.generatePayslip = async (req, res) => {
     // Up to src -> services -> mail -> templates.
     // So "../services/mail/templates/payslip-generation.hbs". 
 
-    const template = fs.readFileSync(templatePath, "utf-8");
-    const compiledTemplate = hbs.handlebars.compile(template);
-    const payslipHtml = compiledTemplate(payslipData);
+    // Check if template file exists
+    if (!fs.existsSync(templatePath)) {
+      console.error(`Template file not found at: ${templatePath}`);
+      return res.status(500).json({ 
+        error: "Payslip template file not found. Please contact administrator." 
+      });
+    }
+
+    let template;
+    try {
+      template = fs.readFileSync(templatePath, "utf-8");
+    } catch (err) {
+      console.error("Error reading template file:", err);
+      return res.status(500).json({ 
+        error: "Error reading payslip template. Please contact administrator." 
+      });
+    }
+
+    let payslipHtml;
+    try {
+      const compiledTemplate = hbs.handlebars.compile(template);
+      payslipHtml = compiledTemplate(payslipData);
+    } catch (err) {
+      console.error("Error compiling template:", err);
+      return res.status(500).json({ 
+        error: "Error compiling payslip template. Please contact administrator." 
+      });
+    }
 
     pdf.create(payslipHtml).toBuffer(async (err, buffer) => {
       if (err) {
         console.error("Error generating PDF:", err);
         return res.status(500).json({ error: "Unable to generate payslip PDF. Please try again later." });
+      }
+
+      // Check AWS configuration
+      if (!process.env.AWS_BUCKET_NAME || !process.env.AWS_REGION) {
+        console.error("AWS configuration missing");
+        return res.status(500).json({ 
+          error: "AWS S3 configuration is missing. Please contact administrator." 
+        });
       }
 
       const params = {
@@ -227,27 +284,52 @@ exports.generatePayslip = async (req, res) => {
 
       let attempts = 0;
       const maxRetries = 5;
+      let uploadError = null;
       while (attempts < maxRetries) {
         try {
           const command = new PutObjectCommand(params);
           await s3Client.send(command);
+          uploadError = null;
           break; 
         } catch (err) {
           attempts++;
-          if (attempts >= maxRetries) throw err;
+          uploadError = err;
+          if (attempts >= maxRetries) {
+            console.error("Error uploading to S3 after retries:", err);
+            return res.status(500).json({ 
+              error: "Failed to upload payslip to storage. Please try again later." 
+            });
+          }
         }
       }
 
       const payslipUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${params.Key}`;
 
-      const newPayslip = new Payslip({ empId, month, year, payslipUrl });
-      await newPayslip.save();
+      let newPayslip;
+      try {
+        newPayslip = new Payslip({ empId, month, year, payslipUrl });
+        await newPayslip.save();
+      } catch (saveError) {
+        console.error("Error saving payslip to database:", saveError);
+        return res.status(500).json({ 
+          error: "Failed to save payslip. Please try again later." 
+        });
+      }
 
-      const adminId = req.employeeId || "QWIT-1001";
-      const adminEmployee = await Employees.findOne({ employeeId: adminId });
-      const adminName = adminEmployee 
-        ? `${adminEmployee.firstName} ${adminEmployee.lastName}`
-        : 'Admin';
+      // Get admin ID from request (if middleware is present) or use default
+      const adminId = req.employeeId || req.body.adminId || "SYSTEM";
+      let adminEmployee;
+      let adminName = 'Admin';
+      try {
+        adminEmployee = await Employees.findOne({ employeeId: adminId });
+        if (adminEmployee) {
+          adminName = adminEmployee.fullName || 
+            `${adminEmployee.firstName || ''} ${adminEmployee.lastName || ''}`.trim() || 'Admin';
+        }
+      } catch (adminError) {
+        console.error("Error fetching admin employee:", adminError);
+        // Continue with default admin name
+      }
 
       try {
         const monthNames = ["January", "February", "March", "April", "May", "June",
