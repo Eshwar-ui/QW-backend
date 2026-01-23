@@ -10,11 +10,22 @@ const hbs = exphbs.create({});
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 require("dotenv").config();
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION,
+// Initialize S3 client with credentials if available
+const s3ClientConfig = {
+  region: process.env.AWS_REGION || 'us-east-1',
   maxRetries: 5,
-  requestTimeout: 300000, 
-});
+  requestTimeout: 300000,
+};
+
+// Add credentials if they are provided in environment variables
+if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+  s3ClientConfig.credentials = {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+}
+
+const s3Client = new S3Client(s3ClientConfig);
 
 exports.uploadPayslip = async (req, res) => {
   try {
@@ -269,9 +280,17 @@ exports.generatePayslip = async (req, res) => {
 
       // Check AWS configuration
       if (!process.env.AWS_BUCKET_NAME || !process.env.AWS_REGION) {
-        console.error("AWS configuration missing");
+        console.error("AWS configuration missing - Bucket:", process.env.AWS_BUCKET_NAME, "Region:", process.env.AWS_REGION);
         return res.status(500).json({ 
           error: "AWS S3 configuration is missing. Please contact administrator." 
+        });
+      }
+
+      // Check if AWS credentials are available
+      if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+        console.error("AWS credentials missing");
+        return res.status(500).json({ 
+          error: "AWS S3 credentials are not configured. Please contact administrator." 
         });
       }
 
@@ -294,12 +313,33 @@ exports.generatePayslip = async (req, res) => {
         } catch (err) {
           attempts++;
           uploadError = err;
+          console.error(`S3 upload attempt ${attempts} failed:`, err.message || err);
           if (attempts >= maxRetries) {
-            console.error("Error uploading to S3 after retries:", err);
+            console.error("Error uploading to S3 after retries:", {
+              message: err.message,
+              code: err.code,
+              name: err.name,
+              stack: err.stack,
+            });
+            
+            // Provide more specific error message based on error type
+            let errorMessage = "Failed to upload payslip to storage. Please try again later.";
+            if (err.code === 'CredentialsError' || err.name === 'CredentialsError') {
+              errorMessage = "AWS credentials are invalid or expired. Please contact administrator.";
+            } else if (err.code === 'NoSuchBucket') {
+              errorMessage = `AWS S3 bucket "${process.env.AWS_BUCKET_NAME}" does not exist. Please contact administrator.`;
+            } else if (err.code === 'AccessDenied') {
+              errorMessage = "Access denied to AWS S3 bucket. Please check permissions.";
+            } else if (err.message) {
+              errorMessage = `S3 upload failed: ${err.message}`;
+            }
+            
             return res.status(500).json({ 
-              error: "Failed to upload payslip to storage. Please try again later." 
+              error: errorMessage 
             });
           }
+          // Wait before retrying (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
         }
       }
 
