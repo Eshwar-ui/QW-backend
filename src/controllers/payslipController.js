@@ -10,22 +10,13 @@ const hbs = exphbs.create({});
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 require("dotenv").config();
 
-// Initialize S3 client with credentials if available
-const s3ClientConfig = {
+// Initialize S3 client - AWS SDK will automatically resolve credentials
+// from IAM role, environment variables, or shared config
+const s3Client = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',
   maxRetries: 5,
   requestTimeout: 300000,
-};
-
-// Add credentials if they are provided in environment variables
-if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-  s3ClientConfig.credentials = {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  };
-}
-
-const s3Client = new S3Client(s3ClientConfig);
+});
 
 exports.uploadPayslip = async (req, res) => {
   try {
@@ -230,18 +221,7 @@ exports.generatePayslip = async (req, res) => {
       netPay: NetSalary,
     };
 
-    const templatePath = path.join(__dirname, "../services/mail/templates/payslip-generation.hbs");
-    // WARNING: Code assumes templates are in specific location. Must ensure this file exists.
-    // Legacy path was "../src/mail/templates/payslip-generation.hbs" relative to routes/legacyApi.routes.js?
-    // legacyApi.routes.js was in src/routes/
-    // So ../src/mail/templates/ is src/src/mail/templates?? No.
-    // legacyApi.routes.js is in src/routes.
-    // original file was in routes/apiRoutes.js.
-    // Original path: "../src/mail/templates/payslip-generation.hbs"
-    // From routes/apiRoutes.js (root/routes/apiRoutes.js) -> up to root -> src/mail/templates...
-    // Now we are in src/controllers/payslipController.js.
-    // Up to src -> services -> mail -> templates.
-    // So "../services/mail/templates/payslip-generation.hbs". 
+    const templatePath = path.join(__dirname, "../services/mail/templates/payslip-generation.hbs"); 
 
     // Check if template file exists
     if (!fs.existsSync(templatePath)) {
@@ -272,127 +252,128 @@ exports.generatePayslip = async (req, res) => {
       });
     }
 
-    pdf.create(payslipHtml).toBuffer(async (err, buffer) => {
-      if (err) {
-        console.error("Error generating PDF:", err);
-        return res.status(500).json({ error: "Unable to generate payslip PDF. Please try again later." });
-      }
-
-      // Check AWS configuration
-      if (!process.env.AWS_BUCKET_NAME || !process.env.AWS_REGION) {
-        console.error("AWS configuration missing - Bucket:", process.env.AWS_BUCKET_NAME, "Region:", process.env.AWS_REGION);
-        return res.status(500).json({ 
-          error: "AWS S3 configuration is missing. Please contact administrator." 
+    // Generate PDF buffer using Promise
+    let buffer;
+    try {
+      buffer = await new Promise((resolve, reject) => {
+        pdf.create(payslipHtml).toBuffer((err, buf) => {
+          if (err) reject(err);
+          else resolve(buf);
         });
-      }
+      });
+    } catch (err) {
+      console.error("Error generating PDF:", err);
+      return res.status(500).json({ error: "Unable to generate payslip PDF. Please try again later." });
+    }
 
-      // Check if AWS credentials are available
-      if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
-        console.error("AWS credentials missing");
-        return res.status(500).json({ 
-          error: "AWS S3 credentials are not configured. Please contact administrator." 
-        });
-      }
+    // Check AWS configuration
+    if (!process.env.AWS_BUCKET_NAME || !process.env.AWS_REGION) {
+      console.error("AWS configuration missing - Bucket:", process.env.AWS_BUCKET_NAME, "Region:", process.env.AWS_REGION);
+      return res.status(500).json({ 
+        error: "AWS S3 configuration is missing. Please contact administrator." 
+      });
+    }
 
-      const params = {
-        Bucket: process.env.AWS_BUCKET_NAME,
-        Key: `payslips/${empId}_${year}_${month}.pdf`,
-        Body: buffer,
-        ContentType: "application/pdf",
-      };
+    const params = {
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: `payslips/${empId}_${year}_${month}.pdf`,
+      Body: buffer,
+      ContentType: "application/pdf",
+    };
 
-      let attempts = 0;
-      const maxRetries = 5;
-      let uploadError = null;
-      while (attempts < maxRetries) {
-        try {
-          const command = new PutObjectCommand(params);
-          await s3Client.send(command);
-          uploadError = null;
-          break; 
-        } catch (err) {
-          attempts++;
-          uploadError = err;
-          console.error(`S3 upload attempt ${attempts} failed:`, err.message || err);
-          if (attempts >= maxRetries) {
-            console.error("Error uploading to S3 after retries:", {
-              message: err.message,
-              code: err.code,
-              name: err.name,
-              stack: err.stack,
-            });
-            
-            // Provide more specific error message based on error type
-            let errorMessage = "Failed to upload payslip to storage. Please try again later.";
-            if (err.code === 'CredentialsError' || err.name === 'CredentialsError') {
-              errorMessage = "AWS credentials are invalid or expired. Please contact administrator.";
-            } else if (err.code === 'NoSuchBucket') {
-              errorMessage = `AWS S3 bucket "${process.env.AWS_BUCKET_NAME}" does not exist. Please contact administrator.`;
-            } else if (err.code === 'AccessDenied') {
-              errorMessage = "Access denied to AWS S3 bucket. Please check permissions.";
-            } else if (err.message) {
-              errorMessage = `S3 upload failed: ${err.message}`;
-            }
-            
-            return res.status(500).json({ 
-              error: errorMessage 
-            });
+    // Upload to S3 with retry logic
+    let attempts = 0;
+    const maxRetries = 5;
+    while (attempts < maxRetries) {
+      try {
+        const command = new PutObjectCommand(params);
+        await s3Client.send(command);
+        break; 
+      } catch (err) {
+        attempts++;
+        console.error(`S3 upload attempt ${attempts} failed:`, err.message || err);
+        if (attempts >= maxRetries) {
+          console.error("Error uploading to S3 after retries:", {
+            message: err.message,
+            code: err.code,
+            name: err.name,
+            stack: err.stack,
+          });
+          
+          // Provide more specific error message based on error type
+          let errorMessage = "Failed to upload payslip to storage. Please try again later.";
+          if (err.code === 'CredentialsError' || err.name === 'CredentialsError') {
+            errorMessage = "AWS credentials are invalid or expired. Please contact administrator.";
+          } else if (err.code === 'NoSuchBucket') {
+            errorMessage = `AWS S3 bucket "${process.env.AWS_BUCKET_NAME}" does not exist. Please contact administrator.`;
+          } else if (err.code === 'AccessDenied') {
+            errorMessage = "Access denied to AWS S3 bucket. Please check permissions.";
+          } else if (err.message) {
+            errorMessage = `S3 upload failed: ${err.message}`;
           }
-          // Wait before retrying (exponential backoff)
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+          
+          return res.status(500).json({ 
+            error: errorMessage 
+          });
         }
+        // Wait before retrying (exponential backoff)
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
       }
+    }
 
-      const payslipUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${params.Key}`;
+    const payslipUrl = `https://${params.Bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${params.Key}`;
 
-      let newPayslip;
-      try {
-        newPayslip = new Payslip({ empId, month, year, payslipUrl });
-        await newPayslip.save();
-      } catch (saveError) {
-        console.error("Error saving payslip to database:", saveError);
-        return res.status(500).json({ 
-          error: "Failed to save payslip. Please try again later." 
-        });
-      }
+    // Save payslip to database
+    let newPayslip;
+    try {
+      newPayslip = new Payslip({ empId, month, year, payslipUrl });
+      await newPayslip.save();
+    } catch (saveError) {
+      console.error("Error saving payslip to database:", saveError);
+      return res.status(500).json({ 
+        error: "Failed to save payslip. Please try again later." 
+      });
+    }
 
-      // Get admin ID from request (if middleware is present) or use default
-      const adminId = req.employeeId || req.body.adminId || "SYSTEM";
-      let adminEmployee;
-      let adminName = 'Admin';
-      try {
-        adminEmployee = await Employees.findOne({ employeeId: adminId });
+    // Get admin ID from JWT middleware (req.employeeId) or fallback to SYSTEM
+    const adminId = req.employeeId || "SYSTEM";
+    let adminName = 'Admin';
+    try {
+      if (adminId !== "SYSTEM") {
+        const adminEmployee = await Employees.findOne({ employeeId: adminId });
         if (adminEmployee) {
           adminName = adminEmployee.fullName || 
             `${adminEmployee.firstName || ''} ${adminEmployee.lastName || ''}`.trim() || 'Admin';
         }
-      } catch (adminError) {
-        console.error("Error fetching admin employee:", adminError);
-        // Continue with default admin name
       }
+    } catch (adminError) {
+      console.error("Error fetching admin employee:", adminError);
+      // Continue with default admin name
+    }
 
-      try {
-        const monthNames = ["January", "February", "March", "April", "May", "June",
-          "July", "August", "September", "October", "November", "December"];
-        const notification = new Notification({
-          recipientId: empId,
-          senderId: adminId,
-          senderName: adminName,
-          type: 'payslip',
-          title: 'Payslip Generated',
-          message: `Your payslip for ${monthNames[month - 1]} ${year} has been generated and is now available.`,
-          relatedId: newPayslip._id.toString(),
-          isRead: false,
-        });
-        await notification.save();
-      } catch (notifError) {
-        console.error("Error creating notification:", notifError);
-      }
-
-      res.status(200).json({
-        message: "Payslip generated and saved successfully",
-        payslipUrl,
+    // Create notification - failure should not block payslip generation
+    try {
+      const monthNames = ["January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"];
+      const notification = new Notification({
+        recipientId: empId,
+        senderId: adminId,
+        senderName: adminName,
+        type: 'payslip',
+        title: 'Payslip Generated',
+        message: `Your payslip for ${monthNames[month - 1]} ${year} has been generated and is now available.`,
+        relatedId: newPayslip._id.toString(),
+        isRead: false,
       });
+      await notification.save();
+    } catch (notifError) {
+      // Log error but don't fail the API response
+      console.error("Error creating notification (non-blocking):", notifError);
+    }
+
+    res.status(200).json({
+      message: "Payslip generated and saved successfully",
+      payslipUrl,
     });
   } catch (error) {
     console.error(error);
